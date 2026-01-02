@@ -43,6 +43,7 @@ SUPABASE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '')
 supabase = None
 if SUPABASE_AVAILABLE and SUPABASE_URL and SUPABASE_KEY:
     try:
+        # Đã xóa tham số proxy gây lỗi
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         print("✅ Supabase client initialized")
     except Exception as e:
@@ -75,16 +76,6 @@ def load_model():
 # ============================================
 
 def preprocess_image(image_data, source='base64'):
-    """
-    Preprocess image for model prediction
-    
-    Args:
-        image_data: Base64 string or binary data
-        source: 'base64' or 'binary'
-    
-    Returns:
-        numpy array (1, 224, 224, 3)
-    """
     try:
         # Decode image
         if source == 'base64':
@@ -141,46 +132,14 @@ def health():
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    """
-    Main prediction endpoint
-    
-    Expected JSON:
-    {
-        "image": "base64_encoded_image_string"
-    }
-    
-    Returns:
-    {
-        "success": true,
-        "prediction": {
-            "class": "Fire",
-            "confidence": 95.23,
-            "is_danger": true,
-            "all_predictions": {
-                "Fire": 95.23,
-                "Neutral": 2.14,
-                "Smoke": 2.63
-            }
-        },
-        "timestamp": "2024-01-01T12:00:00",
-        "database_id": 123
-    }
-    """
     try:
-        # Get JSON data
         data = request.get_json()
         
         if not data:
-            return jsonify({
-                "success": False,
-                "error": "No JSON data provided"
-            }), 400
+            return jsonify({"success": False, "error": "No JSON data provided"}), 400
         
         if 'image' not in data:
-            return jsonify({
-                "success": False,
-                "error": "No image provided in request"
-            }), 400
+            return jsonify({"success": False, "error": "No image provided in request"}), 400
         
         # Load model
         loaded_model = load_model()
@@ -193,8 +152,6 @@ def predict():
         print("🤖 Running inference...")
         predictions = loaded_model.predict(img_array, verbose=0)[0]
         
-        # ⚠️ CRITICAL: Class names MUST match training!
-        # Your model was trained with: ['Fire', 'Neutral', 'Smoke']
         class_names = ['Fire', 'Neutral', 'Smoke']
         
         # Get prediction results
@@ -247,21 +204,14 @@ def predict():
         return jsonify(response_data)
     
     except ValueError as e:
-        return jsonify({
-            "success": False,
-            "error": f"Image processing error: {str(e)}"
-        }), 400
+        return jsonify({"success": False, "error": f"Image processing error: {str(e)}"}), 400
     
     except Exception as e:
         print(f"❌ Prediction error: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": f"Server error: {str(e)}"
-        }), 500
+        return jsonify({"success": False, "error": f"Server error: {str(e)}"}), 500
 
 @app.route('/test', methods=['GET'])
 def test():
-    """Test endpoint without image"""
     try:
         loaded_model = load_model()
         return jsonify({
@@ -271,51 +221,18 @@ def test():
             "output_shape": str(loaded_model.output_shape)
         })
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "error": str(e)
-        }), 500
-
-# ============================================
-# ERROR HANDLERS
-# ============================================
-
-@app.errorhandler(404)
-def not_found(e):
-    return jsonify({
-        "success": False,
-        "error": "Endpoint not found",
-        "available_endpoints": ["/", "/health", "/predict"]
-    }), 404
-
-@app.errorhandler(500)
-def internal_error(e):
-    return jsonify({
-        "success": False,
-        "error": "Internal server error"
-    }), 500
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 # ============================================
 # MAIN
 # ============================================
 
 if __name__ == '__main__':
-    print("=" * 70)
-    print("🔥 FIRE DETECTION AI SERVICE")
-    print("=" * 70)
-    
-    # Load model on startup
     try:
         load_model()
         print("✅ Model preloaded successfully")
     except Exception as e:
         print(f"⚠️  Model preload failed: {e}")
     
-    # Get port from environment
     port = int(os.environ.get('PORT', 5000))
-    
-    print(f"\n🚀 Starting server on port {port}...")
-    print("=" * 70)
-    
-    # Run Flask app
     app.run(host='0.0.0.0', port=port, debug=False)
