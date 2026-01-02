@@ -1,11 +1,30 @@
 """
 ============================================
-FIRE DETECTION AI SERVICE
+FIRE & SMOKE DETECTION API
 ============================================
-Flask API for fire/smoke detection
-Deploy: Render.com
+Deploy: Render
+Fix: Supabase proxy crash
 ============================================
 """
+
+# ============================================
+# FORCE REMOVE PROXY ENV (CRITICAL FIX)
+# ============================================
+
+import os
+
+for key in [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+]:
+    os.environ.pop(key, None)
+
+# ============================================
+# IMPORTS
+# ============================================
 
 from flask import Flask, request, jsonify
 import tensorflow as tf
@@ -13,16 +32,15 @@ import numpy as np
 from PIL import Image
 import io
 import base64
-import os
 from datetime import datetime
 
 # ============================================
-# SUPABASE (SAFE INIT - NO PROXY)
+# SUPABASE INIT (SAFE)
 # ============================================
 
 supabase = None
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -31,6 +49,8 @@ if SUPABASE_URL and SUPABASE_KEY:
         print("✅ Supabase connected")
     except Exception as e:
         print(f"❌ Supabase init failed: {e}")
+else:
+    print("⚠️ Supabase disabled (missing env)")
 
 # ============================================
 # FLASK APP
@@ -40,7 +60,7 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB
 
 # ============================================
-# MODEL
+# MODEL LOAD
 # ============================================
 
 MODEL_PATH = "fire_smoke_detection_model"
@@ -55,29 +75,30 @@ def load_model():
     return model
 
 # ============================================
-# IMAGE PROCESSING
+# IMAGE PREPROCESS
 # ============================================
 
-def preprocess_image(base64_image):
-    img = Image.open(io.BytesIO(base64.b64decode(base64_image)))
-    img = img.convert("RGB").resize((224, 224))
-    arr = np.array(img, dtype=np.float32) / 255.0
+def preprocess_image(base64_image: str):
+    img_bytes = base64.b64decode(base64_image)
+    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    img = img.resize((224, 224))
+    arr = np.asarray(img, dtype=np.float32) / 255.0
     return np.expand_dims(arr, axis=0)
 
 # ============================================
 # ROUTES
 # ============================================
 
-@app.route("/")
-def home():
+@app.route("/", methods=["GET"])
+def index():
     return jsonify({
         "status": "online",
-        "service": "Fire Detection AI",
+        "service": "Fire Smoke Detection AI",
         "model_loaded": model is not None,
         "supabase": "connected" if supabase else "disabled"
     })
 
-@app.route("/health")
+@app.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "status": "healthy",
@@ -86,13 +107,13 @@ def health():
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    data = request.get_json()
+    data = request.get_json(silent=True)
     if not data or "image" not in data:
-        return jsonify({"error": "No image provided"}), 400
+        return jsonify({"error": "Missing base64 image"}), 400
 
-    model = load_model()
+    mdl = load_model()
     img = preprocess_image(data["image"])
-    preds = model.predict(img, verbose=0)[0]
+    preds = mdl.predict(img, verbose=0)[0]
 
     labels = ["Fire", "Neutral", "Smoke"]
     idx = int(np.argmax(preds))
@@ -100,14 +121,13 @@ def predict():
     result = {
         "class": labels[idx],
         "confidence": round(float(preds[idx]) * 100, 2),
-        "all_predictions": {
+        "scores": {
             labels[i]: round(float(preds[i]) * 100, 2)
-            for i in range(3)
+            for i in range(len(labels))
         },
-        "timestamp": datetime.utcnow().isoformat()
+        "created_at": datetime.utcnow().isoformat()
     }
 
-    # Save to Supabase
     if supabase:
         try:
             supabase.table("predictions").insert(result).execute()
@@ -122,5 +142,5 @@ def predict():
 
 if __name__ == "__main__":
     load_model()
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
