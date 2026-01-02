@@ -61,6 +61,19 @@ def load_model():
     return model
 
 # ============================================
+# PRE-LOAD MODEL (for Gunicorn)
+# ============================================
+# Load model khi module được import (bởi Gunicorn)
+# Không đợi đến request đầu tiên
+try:
+    print("🚀 Pre-loading model for Gunicorn...")
+    load_model()
+    print("✅ Model pre-loaded successfully!")
+except Exception as e:
+    print(f"⚠️ Model pre-load failed: {e}")
+    print("⚠️ Model will be loaded on first prediction request")
+
+# ============================================
 # IMAGE PREPROCESSING
 # ============================================
 
@@ -100,7 +113,7 @@ def index():
         "supabase": "connected" if supabase else "disabled",
         "endpoints": {
             "predict": "/predict (POST)",
-            "health": "/ (GET)"
+            "health": "/health (GET)"
         }
     })
 
@@ -225,7 +238,7 @@ def internal_error(error):
 # ============================================
 
 if __name__ == "__main__":
-    # Pre-load model khi start
+    # Pre-load model khi start (cho local development)
     try:
         load_model()
         print("🚀 Server starting...")
