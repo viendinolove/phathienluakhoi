@@ -1,0 +1,18 @@
+==============================================
+FIRE DETECTION SYSTEM - DEPLOYMENT INFO
+==============================================
+
+AI SERVICE:
+URL: https://phathienluakhoi.onrender.com
+Status: Live
+Platform: Render.com (Free tier)
+
+ENDPOINTS:
+- Health: https://phathienluakhoi.onrender.com/health
+- Predict: https://phathienluakhoi.onrender.com/predict
+
+SUPABASE:
+Project URL: https://dlgdjcggujcjcagnzdat.supabase.co
+Status: Connected
+
+==============================================
