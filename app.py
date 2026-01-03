@@ -1,171 +1,170 @@
 """
 ============================================
-FIRE & SMOKE DETECTION SYSTEM - DEMO VERSION
+FIRE & SMOKE DETECTION AI SERVICE
+Deploy to: Render.com
 ============================================
-Features: API JSON + Visual Dashboard
 """
 
-from flask import Flask, request, jsonify, Response, send_file
-import tensorflow as tf
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from tensorflow.keras.models import load_model
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont # Thêm thư viện vẽ
-import io
 import base64
-import os
-from datetime import datetime
+from PIL import Image
+import io
+import logging
 
-# ============================================
-# CONFIG & GLOBALS
-# ============================================
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
+CORS(app)
 
-# Biến toàn cục để lưu ảnh mới nhất phục vụ Demo
-latest_visualized_frame = None 
-
-# Supabase (Giữ nguyên của bạn)
-supabase = None
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-if SUPABASE_URL and SUPABASE_KEY:
-    try:
-        from supabase import create_client
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        print("✅ Supabase connected")
-    except Exception as e:
-        print(f"❌ Supabase failed: {e}")
-
-# ============================================
-# MODEL STUFF
-# ============================================
-MODEL_PATH = "fire_smoke_detection_model"
-model = None
-
-def load_model():
-    global model
-    if model is None:
-        model = tf.keras.models.load_model(MODEL_PATH)
-        print("✅ Model loaded")
-    return model
+# Load model at startup
+MODEL_PATH = 'fire_smoke_detection_model'
+CLASS_NAMES = ['Fire', 'Smoke', 'Normal']
+IMG_SIZE = (224, 224)  # Adjust based on your model
 
 try:
-    load_model()
-except:
-    pass
+    model = load_model(MODEL_PATH)
+    logger.info("✓ Model loaded successfully!")
+except Exception as e:
+    logger.error(f"✗ Model load failed: {e}")
+    model = None
 
-# ============================================
-# HELPER: VẼ CẢNH BÁO LÊN ẢNH
-# ============================================
-def visualize_prediction(pil_image, label, confidence):
-    """Vẽ khung và chữ lên ảnh để hiển thị Demo"""
-    draw = ImageDraw.Draw(pil_image)
-    
-    # Chọn màu: Đỏ cho Fire, Xám cho Smoke, Xanh cho Neutral
-    color = (0, 255, 0) # Green
-    if label == "Fire": color = (255, 0, 0) # Red
-    elif label == "Smoke": color = (128, 128, 128) # Gray
-    
-    # Vẽ chữ (Nếu không có font thì dùng default)
-    text = f"{label}: {confidence}%"
-    
-    # Vẽ hình chữ nhật nền cho chữ để dễ đọc
-    # Tọa độ (10, 10)
-    draw.rectangle([(5, 5), (150, 25)], fill="black")
-    draw.text((10, 10), text, fill=color)
-    
-    # Vẽ khung bao quanh ảnh nếu có cháy
-    if label == "Fire":
-        draw.rectangle([(0,0), (pil_image.width-1, pil_image.height-1)], outline="red", width=5)
-        
-    return pil_image
+# ===== HEALTH CHECK ENDPOINTS =====
 
-# ============================================
-# ROUTES
-# ============================================
+@app.route('/', methods=['GET'])
+def home():
+    """Homepage with API info"""
+    return jsonify({
+        "status": "online",
+        "service": "Fire & Smoke Detection AI",
+        "version": "1.0",
+        "endpoints": {
+            "/": "GET - Service info",
+            "/health": "GET - Health check",
+            "/predict": "POST - Image prediction"
+        },
+        "model_loaded": model is not None,
+        "classes": CLASS_NAMES
+    }), 200
 
-@app.route("/")
-def index():
-    """Trang Dashboard để xem Demo"""
-    html_dashboard = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>🔥 AI Fire Detection System</title>
-        <meta http-equiv="refresh" content="2"> <style>
-            body { font-family: Arial, sans-serif; text-align: center; background: #222; color: white; }
-            .container { margin-top: 50px; }
-            img { border: 5px solid #fff; border-radius: 10px; max-width: 100%; }
-            h1 { color: #f39c12; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>HỆ THỐNG CẢNH BÁO CHÁY AIOT</h1>
-            <p>Trạng thái thời gian thực từ ESP32-CAM</p>
-            <br>
-            <img src="/latest_frame" alt="Waiting for ESP32 stream..." width="640">
-            <p><i>Hệ thống tự động cập nhật mỗi 2 giây</i></p>
-        </div>
-    </body>
-    </html>
-    """
-    return html_dashboard
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check for monitoring"""
+    return jsonify({
+        "status": "healthy" if model is not None else "unhealthy",
+        "model_loaded": model is not None
+    }), 200 if model is not None else 503
 
-@app.route("/latest_frame")
-def get_latest_frame():
-    """Trả về ảnh đã được AI xử lý gần nhất"""
-    global latest_visualized_frame
-    if latest_visualized_frame:
-        return send_file(latest_visualized_frame, mimetype='image/jpeg')
-    else:
-        return "No image received yet", 404
+# ===== PREDICTION ENDPOINT =====
 
-@app.route("/predict", methods=["POST"])
+@app.route('/predict', methods=['POST'])
 def predict():
-    global latest_visualized_frame
+    """
+    Predict fire/smoke from base64 image
+    
+    Request JSON:
+    {
+        "image": "base64_encoded_image_string"
+    }
+    
+    Response JSON:
+    {
+        "prediction": {
+            "class": "Fire|Smoke|Normal",
+            "confidence": 95.5
+        },
+        "class": "Fire",
+        "confidence": 95.5
+    }
+    """
     try:
+        # Validate request
         data = request.get_json()
-        if not data or "image" not in data:
-            return jsonify({"error": "No image"}), 400
         
-        # 1. Decode ảnh
-        img_data = base64.b64decode(data["image"])
-        img_pil = Image.open(io.BytesIO(img_data)).convert("RGB")
+        if not data or 'image' not in data:
+            return jsonify({
+                "error": "No image provided",
+                "message": "Request must include 'image' field with base64 string"
+            }), 400
         
-        # 2. Xử lý cho AI (Resize)
-        img_ai = img_pil.resize((224, 224))
-        arr = np.asarray(img_ai, dtype=np.float32) / 255.0
-        arr = np.expand_dims(arr, axis=0)
+        logger.info("Received prediction request")
         
-        # 3. Predict
-        mdl = load_model()
-        preds = mdl.predict(arr, verbose=0)[0]
-        labels = ["Fire", "Neutral", "Smoke"]
-        idx = int(np.argmax(preds))
-        label = labels[idx]
-        conf = round(float(preds[idx]) * 100, 2)
+        # Check if model loaded
+        if model is None:
+            return jsonify({
+                "error": "Model not loaded",
+                "message": "AI model failed to load at startup"
+            }), 500
         
-        # 4. Vẽ kết quả lên ảnh gốc (để hiển thị Dashboard)
-        # Resize ảnh gốc to ra chút để xem cho rõ nếu ESP gửi ảnh nhỏ
-        img_display = img_pil.resize((640, 480)) 
-        img_display = visualize_prediction(img_display, label, conf)
+        # Decode base64 image
+        try:
+            img_data = base64.b64decode(data['image'])
+            img = Image.open(io.BytesIO(img_data))
+        except Exception as e:
+            return jsonify({
+                "error": "Invalid image data",
+                "message": f"Failed to decode base64: {str(e)}"
+            }), 400
         
-        # Lưu vào bộ nhớ RAM để route /latest_frame lấy ra hiển thị
-        byte_io = io.BytesIO()
-        img_display.save(byte_io, 'JPEG')
-        byte_io.seek(0)
-        latest_visualized_frame = byte_io
-
-        # 5. Lưu Supabase (Giữ nguyên logic của bạn)
-        if supabase:
-            # ... (Code lưu Supabase cũ của bạn giữ nguyên ở đây)
-            pass
-
-        return jsonify({"class": label, "confidence": conf})
-
+        # Preprocess image
+        img = img.convert('RGB')
+        img = img.resize(IMG_SIZE)
+        img_array = np.array(img) / 255.0
+        img_array = np.expand_dims(img_array, axis=0)
+        
+        # Make prediction
+        predictions = model.predict(img_array, verbose=0)
+        class_idx = np.argmax(predictions[0])
+        confidence = float(predictions[0][class_idx] * 100)
+        predicted_class = CLASS_NAMES[class_idx]
+        
+        logger.info(f"Prediction: {predicted_class} ({confidence:.2f}%)")
+        
+        # Return result
+        result = {
+            "prediction": {
+                "class": predicted_class,
+                "confidence": round(confidence, 2)
+            },
+            "class": predicted_class,  # For backward compatibility
+            "confidence": round(confidence, 2),
+            "all_predictions": {
+                CLASS_NAMES[i]: round(float(predictions[0][i] * 100), 2)
+                for i in range(len(CLASS_NAMES))
+            }
+        }
+        
+        return jsonify(result), 200
+        
     except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Prediction error: {str(e)}")
+        return jsonify({
+            "error": "Prediction failed",
+            "message": str(e)
+        }), 500
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+# ===== ERROR HANDLERS =====
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({
+        "error": "Not found",
+        "message": "The requested endpoint does not exist"
+    }), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({
+        "error": "Internal server error",
+        "message": "Something went wrong on the server"
+    }), 500
+
+# ===== RUN SERVER =====
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
