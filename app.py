@@ -1,170 +1,254 @@
 """
 ============================================
-FIRE & SMOKE DETECTION AI SERVICE
-Deploy to: Render.com
+FIRE & SMOKE DETECTION API
+============================================
+Render + TensorFlow + Supabase (FIXED)
 ============================================
 """
 
 from flask import Flask, request, jsonify
-from flask_cors import CORS
-from tensorflow.keras.models import load_model
+import tensorflow as tf
 import numpy as np
-import base64
 from PIL import Image
 import io
-import logging
+import base64
+import os
+from datetime import datetime
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ============================================
+# SUPABASE INIT (FIXED VERSION)
+# ============================================
+
+supabase = None
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        from supabase import create_client
+        # Fix: Không truyền proxy parameter
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print("✅ Supabase connected successfully")
+    except Exception as e:
+        print(f"❌ Supabase init failed: {e}")
+        supabase = None
+
+# ============================================
+# FLASK APP
+# ============================================
 
 app = Flask(__name__)
-CORS(app)
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB max
 
-# Load model at startup
-MODEL_PATH = 'fire_smoke_detection_model'
-CLASS_NAMES = ['Fire', 'Smoke', 'Normal']
-IMG_SIZE = (224, 224)  # Adjust based on your model
+# ============================================
+# MODEL LOADING
+# ============================================
 
+MODEL_PATH = "fire_smoke_detection_model"
+model = None
+
+def load_model():
+    """Load TensorFlow model once"""
+    global model
+    if model is None:
+        try:
+            print("🔥 Loading model...")
+            model = tf.keras.models.load_model(MODEL_PATH)
+            print("✅ Model loaded successfully")
+        except Exception as e:
+            print(f"❌ Model loading failed: {e}")
+            raise
+    return model
+
+# ============================================
+# PRE-LOAD MODEL (for Gunicorn)
+# ============================================
+# Load model khi module được import (bởi Gunicorn)
+# Không đợi đến request đầu tiên
 try:
-    model = load_model(MODEL_PATH)
-    logger.info("✓ Model loaded successfully!")
+    print("🚀 Pre-loading model for Gunicorn...")
+    load_model()
+    print("✅ Model pre-loaded successfully!")
 except Exception as e:
-    logger.error(f"✗ Model load failed: {e}")
-    model = None
+    print(f"⚠️ Model pre-load failed: {e}")
+    print("⚠️ Model will be loaded on first prediction request")
 
-# ===== HEALTH CHECK ENDPOINTS =====
+# ============================================
+# IMAGE PREPROCESSING
+# ============================================
 
-@app.route('/', methods=['GET'])
-def home():
-    """Homepage with API info"""
+def preprocess_image(base64_image):
+    """
+    Chuyển đổi base64 image thành tensor cho model
+    Input: base64 string (không có prefix)
+    Output: numpy array (1, 224, 224, 3)
+    """
+    try:
+        # Decode base64
+        img_data = base64.b64decode(base64_image)
+        img = Image.open(io.BytesIO(img_data))
+        
+        # Convert to RGB và resize
+        img = img.convert("RGB").resize((224, 224))
+        
+        # Convert to array và normalize
+        arr = np.asarray(img, dtype=np.float32) / 255.0
+        
+        # Add batch dimension
+        return np.expand_dims(arr, axis=0)
+    except Exception as e:
+        raise ValueError(f"Image preprocessing failed: {e}")
+
+# ============================================
+# API ROUTES
+# ============================================
+
+@app.route("/")
+def index():
+    """Health check endpoint"""
     return jsonify({
         "status": "online",
-        "service": "Fire & Smoke Detection AI",
-        "version": "1.0",
-        "endpoints": {
-            "/": "GET - Service info",
-            "/health": "GET - Health check",
-            "/predict": "POST - Image prediction"
-        },
+        "service": "Fire & Smoke Detection API",
         "model_loaded": model is not None,
-        "classes": CLASS_NAMES
-    }), 200
+        "supabase": "connected" if supabase else "disabled",
+        "endpoints": {
+            "predict": "/predict (POST)",
+            "health": "/health (GET)"
+        }
+    })
 
-@app.route('/health', methods=['GET'])
+@app.route("/health")
 def health():
-    """Health check for monitoring"""
+    """Detailed health check"""
     return jsonify({
-        "status": "healthy" if model is not None else "unhealthy",
-        "model_loaded": model is not None
-    }), 200 if model is not None else 503
+        "status": "healthy",
+        "model": "loaded" if model else "not loaded",
+        "supabase": "connected" if supabase else "disabled",
+        "timestamp": datetime.utcnow().isoformat()
+    })
 
-# ===== PREDICTION ENDPOINT =====
-
-@app.route('/predict', methods=['POST'])
+@app.route("/predict", methods=["POST"])
 def predict():
     """
-    Predict fire/smoke from base64 image
+    Main prediction endpoint
     
-    Request JSON:
+    Request body (JSON):
     {
         "image": "base64_encoded_image_string"
     }
     
-    Response JSON:
+    Response:
     {
-        "prediction": {
-            "class": "Fire|Smoke|Normal",
-            "confidence": 95.5
-        },
-        "class": "Fire",
-        "confidence": 95.5
+        "class": "Fire|Neutral|Smoke",
+        "confidence": 95.23,
+        "timestamp": "2026-01-03T10:30:00.000000",
+        "probabilities": {
+            "Fire": 95.23,
+            "Neutral": 2.45,
+            "Smoke": 2.32
+        }
     }
     """
     try:
         # Validate request
         data = request.get_json()
-        
-        if not data or 'image' not in data:
+        if not data or "image" not in data:
             return jsonify({
-                "error": "No image provided",
-                "message": "Request must include 'image' field with base64 string"
+                "error": "Missing 'image' field in request body",
+                "example": {"image": "base64_string_here"}
             }), 400
         
-        logger.info("Received prediction request")
-        
-        # Check if model loaded
-        if model is None:
-            return jsonify({
-                "error": "Model not loaded",
-                "message": "AI model failed to load at startup"
-            }), 500
-        
-        # Decode base64 image
-        try:
-            img_data = base64.b64decode(data['image'])
-            img = Image.open(io.BytesIO(img_data))
-        except Exception as e:
-            return jsonify({
-                "error": "Invalid image data",
-                "message": f"Failed to decode base64: {str(e)}"
-            }), 400
+        # Load model nếu chưa load
+        mdl = load_model()
         
         # Preprocess image
-        img = img.convert('RGB')
-        img = img.resize(IMG_SIZE)
-        img_array = np.array(img) / 255.0
-        img_array = np.expand_dims(img_array, axis=0)
+        img = preprocess_image(data["image"])
         
-        # Make prediction
-        predictions = model.predict(img_array, verbose=0)
-        class_idx = np.argmax(predictions[0])
-        confidence = float(predictions[0][class_idx] * 100)
-        predicted_class = CLASS_NAMES[class_idx]
+        # Predict
+        preds = mdl.predict(img, verbose=0)[0]
         
-        logger.info(f"Prediction: {predicted_class} ({confidence:.2f}%)")
+        # Class labels
+        labels = ["Fire", "Neutral", "Smoke"]
+        idx = int(np.argmax(preds))
         
-        # Return result
+        # Prepare result
         result = {
-            "prediction": {
-                "class": predicted_class,
-                "confidence": round(confidence, 2)
-            },
-            "class": predicted_class,  # For backward compatibility
-            "confidence": round(confidence, 2),
-            "all_predictions": {
-                CLASS_NAMES[i]: round(float(predictions[0][i] * 100), 2)
-                for i in range(len(CLASS_NAMES))
+            "class": labels[idx],
+            "confidence": round(float(preds[idx]) * 100, 2),
+            "timestamp": datetime.utcnow().isoformat(),
+            "probabilities": {
+                labels[i]: round(float(preds[i]) * 100, 2) 
+                for i in range(len(labels))
             }
         }
         
-        return jsonify(result), 200
+        # Save to Supabase (nếu có)
+        if supabase:
+            try:
+                supabase.table("predictions").insert({
+                    "class": result["class"],
+                    "confidence": result["confidence"],
+                    "timestamp": result["timestamp"],
+                    "fire_prob": result["probabilities"]["Fire"],
+                    "neutral_prob": result["probabilities"]["Neutral"],
+                    "smoke_prob": result["probabilities"]["Smoke"]
+                }).execute()
+                result["saved_to_db"] = True
+            except Exception as db_error:
+                print(f"⚠️ Database save failed: {db_error}")
+                result["saved_to_db"] = False
         
+        return jsonify(result)
+        
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
     except Exception as e:
-        logger.error(f"Prediction error: {str(e)}")
+        print(f"❌ Prediction error: {e}")
         return jsonify({
-            "error": "Prediction failed",
+            "error": "Internal server error",
             "message": str(e)
         }), 500
 
-# ===== ERROR HANDLERS =====
+# ============================================
+# ERROR HANDLERS
+# ============================================
+
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    return jsonify({
+        "error": "File too large",
+        "max_size": "16MB"
+    }), 413
 
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({
-        "error": "Not found",
-        "message": "The requested endpoint does not exist"
+        "error": "Endpoint not found",
+        "available_endpoints": ["/", "/health", "/predict"]
     }), 404
 
 @app.errorhandler(500)
 def internal_error(error):
     return jsonify({
-        "error": "Internal server error",
-        "message": "Something went wrong on the server"
+        "error": "Internal server error"
     }), 500
 
-# ===== RUN SERVER =====
+# ============================================
+# MAIN
+# ============================================
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+if __name__ == "__main__":
+    # Pre-load model khi start (cho local development)
+    try:
+        load_model()
+        print("🚀 Server starting...")
+    except Exception as e:
+        print(f"⚠️ Warning: Could not pre-load model: {e}")
+    
+    # Run Flask app
+    port = int(os.getenv("PORT", 5000))
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False
+    )
